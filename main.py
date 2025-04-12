@@ -1,49 +1,99 @@
 import tweepy
 from textblob import TextBlob
+import matplotlib.pyplot as plt
+import pandas as pd
+import argparse
+from datetime import datetime
+from tqdm import tqdm
+from transformers import pipeline
 
-with open("bearer.txt", "r") as file:
-    bearer_token = file.read().strip()
+def load_transformer_model():
+    return pipeline("sentiment-analysis", model="distilbert-base-uncased-finetuned-sst-2-english")
 
-client = tweepy.Client(bearer_token=bearer_token)
+def analyze_sentiment(text, model=None):
+    if model:
+        result = model(text)[0]
+        label = result["label"]
+        if label == "POSITIVE":
+            return "Positive", result["score"]
+        elif label == "NEGATIVE":
+            return "Negative", result["score"]
+        else:
+            return "Neutral", result["score"]
+    else:
+        blob = TextBlob(text)
+        polarity = blob.sentiment.polarity
+        if polarity > 0:
+            return "Positive", polarity
+        elif polarity < 0:
+            return "Negative", polarity
+        else:
+            return "Neutral", polarity
 
-search_term = "stocks"
-tweet_amount = 200
+def main():
+    parser = argparse.ArgumentParser(description="Tweet Sentiment Analyzer")
+    parser.add_argument("--query", type=str, required=True, help="Search term")
+    parser.add_argument("--max", type=int, default=300, help="Max tweets (default: 300)")
+    parser.add_argument("--transformer", action="store_true", help="Use HuggingFace transformer model")
+    args = parser.parse_args()
 
-response = client.search_recent_tweets(query=search_term, max_results=100, tweet_fields=['lang'])
+    with open("bearer.txt", "r") as file:
+        bearer_token = file.read().strip()
 
-tweets = response.data
+    client = tweepy.Client(bearer_token=bearer_token, wait_on_rate_limit=True)
 
-polarity = 0
-positive = 0
-negative = 0
-neutral = 0
+    model = load_transformer_model() if args.transformer else None
+    print(f"🔍 Searching tweets for '{args.query}' using {'Transformers' if model else 'TextBlob'}...")
 
-if tweets:
-    for tweet in tweets:
-        final_text = tweet.text.replace("RT", " ")
-        if tweet.lang == "en":
-            if final_text.startswith("@"):
-                position = final_text.index(":")
-                final_text = final_text[position+2:]
-            if final_text.startswith("@"):
-                position = final_text.index(" ")
-                final_text = final_text[position+2:]
-        analysis = TextBlob(final_text)
-        tweet_polarity = analysis.sentiment.polarity
-        if tweet_polarity > 0.00:
-            positive += 1
-        elif tweet_polarity < 0.00:
-            negative += 1
-        elif tweet_polarity == 0.00:
-            neutral += 1
-        polarity += tweet_polarity
-        print(f"{final_text} → {tweet_polarity:.2f}")
+    data = {
+        "timestamp": [],
+        "tweet": [],
+        "sentiment": [],
+        "score": []
+    }
 
-    print(polarity)
-    print(f"Amount of positive tweets: {positive}")
-    print(f"Amount of negative tweets: {negative}")
-    print(f"Amount of neutral tweets: {neutral}")
+    pos = neg = neu = 0
 
-else:
-    print("No tweets found.")
+    paginator = tweepy.Paginator(
+        client.search_recent_tweets,
+        query=args.query + " -is:retweet lang:en",
+        max_results=100,
+        tweet_fields=["created_at"],
+        limit=args.max // 100
+    )
 
+    for response in tqdm(paginator, desc="Fetching tweets"):
+        if response.data:
+            for tweet in response.data:
+                text = tweet.text.strip()
+                timestamp = tweet.created_at
+
+                sentiment, score = analyze_sentiment(text, model)
+                if sentiment == "Positive":
+                    pos += 1
+                elif sentiment == "Negative":
+                    neg += 1
+                else:
+                    neu += 1
+
+                data["timestamp"].append(timestamp)
+                data["tweet"].append(text)
+                data["sentiment"].append(sentiment)
+                data["score"].append(score)
+
+    df = pd.DataFrame(data)
+    filename = f"sentiment_{args.query}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+    df.to_csv(filename, index=False)
+    print(f"\n📁 Saved to: {filename}")
+
+    df["sentiment"].value_counts().plot(kind="bar", color=["green", "gray", "red"])
+    plt.title(f"Sentiment Distribution for '{args.query}'")
+    plt.ylabel("Count")
+    plt.xticks(rotation=0)
+    plt.tight_layout()
+    plt.show()
+
+    print(f"\nSummary: {pos} positive, {neg} negative, {neu} neutral")
+
+if __name__ == "__main__":
+    main()
